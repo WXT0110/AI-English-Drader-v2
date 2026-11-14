@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>高中英语 AI 智能批改系统 · 批量批改版</title>
+
+  <!-- Tailwind CSS（含 Typography 插件，用于美化 Markdown 渲染结果） -->
+  <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            navy: {
+              50:  '#eef2f9',
+              100: '#dce5f4',
+              200: '#b9c9e8',
+              300: '#8aa3d4',
+              600: '#2c4f96',
+              700: '#1e3a8a',
+              800: '#17306f',
+              900: '#122352',
+            },
+          },
+          fontFamily: {
+            sans: ['-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', '"PingFang SC"', '"Hiragino Sans GB"', '"Microsoft YaHei"', 'sans-serif'],
+          },
+          boxShadow: {
+            card: '0 4px 24px rgba(18, 35, 82, 0.08)',
+          },
+        },
+      },
+    };
+  </script>
+
+  <!-- marked.js：Markdown 渲染 -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
+
+  <!-- html-docx-js：Word 导出（jsDelivr 失败时回退 unpkg）
+这个界面做得很漂亮，但我需要做一个极其重要的商业化升级：要支持批量上传多张图片，并批量批改！ 请基于刚才的代码继续修改：
+
+【界面交互升级】
+
+1. 将原来的单张图片上传，改为支持 multiple 属性的 <input type="file" multiple accept="image/*">。
+2. 用户选择多张图片后，在下方生成一个图片预览列表（带删除按钮），让用户知道一共传了几张。
+3. 把原来的“作文内容（文字输入）”框改小一点，或者作为高级选项折叠起来。批量批改时，主要依赖上传的图片。
+
+【核心逻辑升级（极其重要）】
+
+1. 点击“开始批改”后，请用 Promise 队列（或 async/await 循环） 处理上传的每一张图片。
+2. 对每一张图片：先用 Canvas 压缩并转 Base64 -> 构造 Kimi 多模态请求 -> 等待返回结果。
+3. 在结果展示区：按顺序生成多个卡片（学生1、学生2...），每个卡片里展示 AI 的批改结果。绝对不能用 innerHTML 一次性覆盖，必须动态追加（append）。
+4. 实时状态反馈：在左侧或顶部加一个进度条（比如“已完成 1/5 篇”），或者一个运行日志，让用户知道系统没有卡死。
+5. 处理并发限制：请在每次请求之间加 1 秒延时，防止 Kimi 接口报错。
+
+【导出功能】
+请引入 html-docx-js（CDN），在所有图片批改完成后，在页面底部出现一个【一键导出所有批改报告为 Word】的按钮，点击后将所有结果打包下载。 -->
+  <script>
+    function loadHtmlDocxFallback() {
+      var s = document.createElement('script');
+      s.src = 'https://unpkg.com/html-docx-js/dist/html-docx.js';
+      document.head.appendChild(s);
+    }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/html-docx-js/dist/html-docx.js" onerror="loadHtmlDocxFallback()"></script>
+
+  <style>
+    body { background-color: #f3f5f8; }
+
+    .fade-in { animation: fadeIn .45s ease both; }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: none; }
+    }
+
+    /* Markdown 渲染区域微调（学术风） */
+    .result-body h1, .result-body h2, .result-body h3, .result-body h4 {
+      color: #122352; font-weight: 700; margin-top: 1.2em;
+    }
+    .result-body h2 { font-size: 1.05em; }
+    .result-body h3 { font-size: 1em; }
+    .result-body p  { margin: .6em 0; }
+    .result-body ul, .result-body ol { margin: .5em 0; padding-left: 1.4em; }
+    .result-body li { margin: .3em 0; }
+    .result-body strong { color: #122352; }
+    .result-body code { background: #eef2f9; color: #122352; padding: .15em .4em; border-radius: 4px; font-size: .9em; }
+    .result-body pre { background: #122352; color: #e8edf7; padding: 1em; border-radius: 8px; overflow: auto; }
+    .result-body pre code { background: transparent; color: inherit; }
+    .result-body blockquote {
+      border-left: 4px solid #2c4f96; background: #eef2f9;
+      padding: .5em 1em; border-radius: 0 8px 8px 0; color: #122352; font-style: normal;
+    }
+    .result-body table { width: 100%; }
+    .result-body img { max-width: 100%; border-radius: 8px; }
+
+    /* Loading spinner */
+    .spinner {
+      width: 18px; height: 18px;
+      border: 2px solid rgba(255,255,255,.35);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* details 折叠箭头 */
+    summary::-webkit-details-marker { display: none; }
+    summary .chev { transition: transform .2s ease; }
+    details[open] summary .chev { transform: rotate(90deg); }
+
+    /* 日志滚动条 */
+    #logBox::-webkit-scrollbar { width: 6px; }
+    #logBox::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+  </style>
+</head>
+
+<body class="font-sans text-slate-700 min-h-screen flex flex-col">
+
+  <!-- ============ 顶部 ============ -->
+  <header class="bg-white border-b border-slate-200">
+    <div class="max-w-5xl mx-auto px-6 py-5 flex items-center gap-4">
+      <div class="w-11 h-11 rounded-xl bg-navy-700 text-white flex items-center justify-center text-xl font-bold shadow-md select-none">英</div>
+      <div>
+        <h1 class="text-xl font-bold text-navy-900 tracking-wide">高中英语 AI 智能批改系统</h1>
+        <p class="text-xs text-slate-400 mt-0.5">AI-Powered Essay Correction · 批量图片批改 · 应用文 / 读后续写</p>
+      </div>
+    </div>
+  </header>
+
+  <main class="flex-1 w-full max-w-5xl mx-auto px-6 py-8 space-y-6">
+
+    <!-- ============ 题型 + 材料 ============ -->
+    <section class="bg-white rounded-2xl shadow-card border border-slate-100 p-6">
+      <div class="grid md:grid-cols-2 gap-6">
+        <div>
+          <label for="essayType" class="block text-sm font-semibold text-navy-900 mb-2">选择题型</label>
+          <select id="essayType"
+            class="w-full h-11 rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-navy-600 focus:border-navy-600 transition">
+            <option value="应用文（15分）">应用文（15分）</option>
+            <option value="读后续写（25分）">读后续写（25分）</option>
+          </select>
+        </div>
+        <div>
+          <label for="material" class="block text-sm font-semibold text-navy-900 mb-2">题目要求 / 前文材料</label>
+          <input id="material" type="text" placeholder="例如：假定你是李华，外教 Chris 准备将学生英文诗歌大赛……"
+            class="w-full h-11 rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-navy-600 focus:border-navy-600 transition" />
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 批量图片上传 ============ -->
+    <section class="bg-white rounded-2xl shadow-card border border-slate-100 p-6">
+      <div class="flex items-center justify-between mb-3">
+        <div class="flex items-center gap-2">
+          <p class="text-sm font-semibold text-navy-900">作文照片（批量上传）</p>
+          <span id="imgCount" class="inline-flex items-center px-2 py-0.5 rounded-full bg-navy-50 text-navy-700 text-xs font-semibold">已上传 0 张</span>
+        </div>
+        <button id="clearImagesBtn" type="button" class="text-xs text-slate-400 hover:text-red-500 transition">清空全部</button>
+      </div>
+
+      <label id="dropZone" for="photoInput"
+        class="flex items-center gap-3 h-20 px-4 rounded-lg border-2 border-dashed border-slate-200 bg-slate-50 cursor-pointer hover:border-navy-600 hover:bg-navy-50 transition-colors">
+        <svg xmlns="http://www.w3.org/2000/svg" class="w-7 h-7 text-navy-700 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.6">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.738-1.043 48.394 48.394 0 00-5.232 0 2.192 2.192 0 00-1.738 1.043l-.821 1.316z" />
+          <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0zM18.75 10.5h.008v.008h-.008V10.5z" />
+        </svg>
+        <div>
+          <p class="text-sm text-slate-600">点击或拖拽上传多张作文照片</p>
+          <p class="text-xs text-slate-400 mt-0.5">支持 JPG / PNG 多选，每张最长边自动压缩至 1024px</p>
+        </div>
+      </label>
+      <input id="photoInput" type="file" multiple accept="image/*" class="hidden" />
+
+      <!-- 图片预览列表 -->
+      <div id="imageList" class="flex flex-wrap gap-3 mt-4"></div>
+      <p id="emptyHint" class="text-xs text-slate-400 mt-3">尚未上传图片。上传后将按顺序编号为「学生 1、学生 2……」并依次批改。</p>
+    </section>
+
+    <!-- ============ 高级选项：文字输入（折叠） ============ -->
+    <details class="bg-white rounded-2xl shadow-card border border-slate-100 px-6 py-4">
+      <summary class="flex items-center gap-2 text-sm font-semibold text-navy-900 cursor-pointer select-none">
+        <svg class="chev w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+        </svg>
+        高级选项：作文内容（文字输入）
+      </summary>
+      <div class="mt-4">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs text-slate-400">可粘贴学生英文作文原文</span>
+          <span id="charCount" class="text-xs text-slate-400">0 词</span>
+        </div>
+        <textarea id="essayText" rows="4" placeholder="在此粘贴作文文字（可选）……"
+          class="w-full rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm leading-relaxed placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-navy-600 focus:border-navy-600 resize-y transition"></textarea>
+        <p class="text-xs text-slate-400 mt-2 leading-relaxed">说明：批量批改主要依赖上传的图片，此处文字将作为附加材料随每张图片一起提交；若未上传任何图片，则将单独批改这段文字。</p>
+      </div>
+    </details>
+
+    <!-- ============ 开始批改 ============ -->
+    <button id="gradeBtn" type="button"
+      class="w-full h-14 rounded-xl bg-navy-700 hover:bg-navy-800 text-white text-base font-semibold tracking-wide shadow-lg shadow-navy-700/20 transition-colors flex items-center justify-center gap-2.5 disabled:opacity-70 disabled:cursor-not-allowed">
+      <span id="btnIcon" class="flex items-center">
+        <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456z" />
+        </svg>
+      </span>
+      <span id="btnText">开始批改</span>
+    </button>
+
+    <p class="text-center text-xs text-slate-400">批改由 Kimi 视觉大模型驱动 · 批量处理时每张图片间隔 1 秒 · 结果仅供参考</p>
+
+    <!-- ============ 进度条 + 运行日志 ============ -->
+    <section id="progressPanel" class="hidden bg-white rounded-2xl shadow-card border border-slate-100 p-6">
+      <div class="flex items-center justify-between mb-2">
+        <span class="text-sm font-semibold text-navy-900">批改进度</span>
+        <span id="progressText" class="text-xs text-slate-500">已完成 0 / 0 篇</span>
+      </div>
+      <div class="h-2 rounded-full bg-slate-100 overflow-hidden">
+        <div id="progressBar" class="h-full bg-navy-700 rounded-full transition-all duration-500" style="width:0%"></div>
+      </div>
+      <div id="logBox" class="mt-4 h-32 overflow-y-auto rounded-lg bg-slate-50 border border-slate-100 p-3 font-mono text-xs leading-relaxed space-y-1"></div>
+    </section>
+
+    <!-- ============ 结果展示区（卡片动态追加） ============ -->
+    <section id="resultSection" class="hidden">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-base font-bold text-navy-900">批改结果</h2>
+        <span id="resultSummary" class="text-xs text-slate-400"></span>
+      </div>
+      <div id="resultCards" class="space-y-6"></div>
+    </section>
+
+    <!-- ============ 导出 Word ============ -->
+    <div id="exportBar" class="hidden pt-2">
+      <button id="exportBtn" type="button"
+        class="w-full h-12 rounded-xl border-2 border-navy-700 bg-white text-navy-700 hover:bg-navy-50 font-semibold tracking-wide transition-colors flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed">
+        <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+        </svg>
+        <span id="exportBtnText">一键导出所有批改报告为 Word（.docx）</span>
+      </button>
+    </div>
+  </main>
+
+  <footer class="text-center text-xs text-slate-400 py-6">高中英语 AI 智能批改系统 · Batch Edition</footer>
+
+  <script>
+    /* ==================== 配置区 ==================== */
+    const API_KEY = 'sk-C5nnz62NDqHPZgN5F5nAVLvTJOHwuyaG9YVvk3kwvGkf4vX7';                     // ← 填入你的 Kimi API Key
+    const API_URL = 'https://api.moonshot.cn/v1/chat/completions';
+    const MODEL   = 'kimi-k3.1-pro';
+    const REQUEST_INTERVAL = 1000;                          // 每次请求之间的延时（ms），防止接口报错
+
+    /* ==================== DOM ==================== */
+    const $ = (id) => document.getElementById(id);
+    const essayTypeEl = $('essayType');
+    const materialEl  = $('material');
+    const essayTextEl = $('essayText');
+    const charCountEl = $('charCount');
+    const photoInput  = $('photoInput');
+    const dropZone    = $('dropZone');
+    const imageList   = $('imageList');
+    const imgCount    = $('imgCount');
+    const emptyHint   = $('emptyHint');
+    const clearImagesBtn = $('clearImagesBtn');
+    const gradeBtn    = $('gradeBtn');
+    const btnIcon     = $('btnIcon');
+    const btnText     = $('btnText');
+    const progressPanel = $('progressPanel');
+    const progressBar = $('progressBar');
+    const progressText = $('progressText');
+    const logBox      = $('logBox');
+    const resultSection = $('resultSection');
+    const resultCards = $('resultCards');
+    const resultSummary = $('resultSummary');
+    const exportBar   = $('exportBar');
+    const exportBtn   = $('exportBtn');
+    const exportBtnText = $('exportBtnText');
+
+    const BTN_ICON_HTML = btnIcon.innerHTML; // 保存原始图标，Loading 结束后还原
+
+    /* ==================== 状态 ==================== */
+    let imageQueue = [];      // { id, name, dataUrl, status: 'compressing'|'ready'|'error' }
+    let idCounter = 0;
+    let isRunning = false;
+    let studentCards = [];    // 本轮所有学生卡片
+    let successCount = 0;
+    let failCount = 0;
+    let batchContext = { type: '', material: '', text: '' }; // 供单篇重试使用
+
+    /* ==================== 工具函数 ==================== */
+    function escapeHtml(str) {
+      return String(str).replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[c]));
+    }
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    function addLog(msg, kind) {
+      const colors = { info: 'text-slate-500', ok: 'text-emerald-600', err: 'text-red-500', warn: 'text-amber-600' };
+      const line = document.createElement('p');
+      line.className = colors[kind] || colors.info;
+      line.textContent = '[' + new Date().toLocaleTimeString('zh-CN', { hour12: false }) + '] ' + msg;
+      logBox.appendChild(line);
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function updateProgress(done, total) {
+      progressText.textContent = '已完成 ' + done + ' / ' + total + ' 篇';
+      progressBar.style.width = total > 0 ? Math.round((done / total) * 100) + '%' : '0%';
+    }
+
+    function updateSummary() {
+      resultSummary.textContent = '共 ' + studentCards.length + ' 篇 · 成功 ' + successCount + ' 篇 · 失败 ' + failCount + ' 篇';
+    }
+
+    /* ==================== 图片压缩（Canvas，最长边 ≤ 1024px → JPEG Base64） ==================== */
+    function compressImage(file, maxSide = 1024, quality = 0.85) {
+      return new Promise((resolve, reject) => {
+        if (!file.type || !file.type.startsWith('image/')) {
+          reject(new Error('请选择图片文件（JPG / PNG）'));
+          return;
+        }
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error('图片读取失败，请重试'));
+        reader.onload = () => {
+          const img = new Image();
+          img.onerror = () => reject(new Error('图片解析失败，请更换文件'));
+          img.onload = () => {
+            let width  = img.naturalWidth  || img.width;
+            let height = img.naturalHeight || img.height;
+            if (Math.max(width, height) > maxSide) {
+              const scale = maxSide / Math.max(width, height);
+              width  = Math.round(width  * scale);
+              height = Math.round(height * scale);
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width  = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#ffffff';   // 先铺白底，避免 PNG 透明区域转 JPEG 后变黑
+            ctx.fillRect(0, 0, width, height);
+            ctx.drawImage(img, 0, 0, width, height);
+            resolve(canvas.toDataURL('image/jpeg', quality)); // data:image/jpeg;base64,...
+          };
+          img.src = reader.result;
+        };
+        reader.readAsDataURL(file);
+      });
+    }
+
+    /* ==================== 批量图片队列 ==================== */
+    async function handleFiles(fileList) {
+      const files = Array.from(fileList || []).filter((f) => f.type && f.type.startsWith('image/'));
+      if (!files.length) return;
+
+      const startId = ++idCounter;
+      const placeholders = files.map((f, i) => ({ id: startId + i, name: f.name, dataUrl: '', status: 'compressing' }));
+      imageQueue.push(...placeholders);
+      renderImageList();
+      addPendingLog('已选择 ' + files.length + ' 张图片，正在压缩处理…');
+
+      // 并行压缩（纯客户端操作，不占用 API 配额）
+      await Promise.all(files.map(async (f, i) => {
+        const item = imageQueue.find((x) => x.id === startId + i);
+        try {
+          const dataUrl = await compressImage(f);
+          if (item) { item.dataUrl = dataUrl; item.status = 'ready'; }
+        } catch (e) {
+          if (item) { item.status = 'error'; }
+        }
+      }));
+      renderImageList();
+    }
+
+    // 日志在批次开始前也可能需要（上传阶段），确保日志区域可见即可写入
+    function addPendingLog(msg) {
+      progressPanel.classList.remove('hidden');
+      addLog(msg, 'info');
+    }
+
+    function renderImageList() {
+      imgCount.textContent = '已上传 ' + imageQueue.length + ' 张';
+      emptyHint.classList.toggle('hidden', imageQueue.length > 0);
+      imageList.innerHTML = '';
+      imageQueue.forEach((item, i) => {
+        const wrap = document.createElement('div');
+        wrap.className = 'fade-in relative';
+        let statusTag = '';
+        if (item.status === 'compressing') {
+          statusTag = '<span class="absolute bottom-8 left-0 right-0 text-center text-[10px] text-navy-700 font-semibold">压缩中…</span>';
+        } else if (item.status === 'error') {
+          statusTag = '<span class="absolute bottom-8 left-0 right-0 text-center text-[10px] text-red-500 font-semibold">压缩失败</span>';
+        }
+        wrap.innerHTML =
+          '<img src="' + (item.dataUrl || '') + '" alt="' + escapeHtml(item.name) + '" ' +
+            'class="w-24 h-24 object-cover rounded-lg border border-slate-200 shadow-sm ' + (item.dataUrl ? '' : 'opacity-40') + '" />' +
+          '<span class="absolute top-1 left-1 px-1.5 py-0.5 rounded bg-navy-700/85 text-white text-[10px] font-semibold">学生 ' + (i + 1) + '</span>' +
+          '<button type="button" data-remove="' + item.id + '" title="移除" ' +
+            'class="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-white border border-slate-200 text-slate-400 hover:text-red-500 hover:border-red-300 shadow flex items-center justify-center text-xs font-bold">×</button>' +
+          statusTag +
+          '<p class="text-[10px] text-slate-400 w-24 truncate text-center mt-1" title="' + escapeHtml(item.name) + '">' + escapeHtml(item.name) + '</p>';
+        imageList.appendChild(wrap);
+      });
+    }
+
+    imageList.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-remove]');
+      if (!btn) return;
+      const id = Number(btn.getAttribute('data-remove'));
+      imageQueue = imageQueue.filter((x) => x.id !== id);
+      renderImageList();
+    });
+
+    clearImagesBtn.addEventListener('click', () => {
+      imageQueue = [];
+      renderImageList();
+    });
+
+    photoInput.addEventListener('change', (e) => {
+      handleFiles(e.target.files);
+      photoInput.value = ''; // 允许再次选择同一文件
+    });
+
+    // 拖拽上传（支持多张）
+    ['dragenter', 'dragover'].forEach((ev) =>
+      dropZone.addEventListener(ev, (e) => {
+        e.preventDefault();
+        dropZone.classList.add('border-navy-600', 'bg-navy-50');
+      })
+    );
+    ['dragleave', 'drop'].forEach((ev) =>
+      dropZone.addEventListener(ev, (e) => {
+        e.preventDefault();
+        dropZone.classList.remove('border-navy-600', 'bg-navy-50');
+      })
+    );
+    dropZone.addEventListener('drop', (e) => {
+      handleFiles(e.dataTransfer.files);
+    });
+
+    /* ==================== 字数统计 ==================== */
+    essayTextEl.addEventListener('input', () => {
+      const words = essayTextEl.value.trim().split(/\s+/).filter(Boolean).length;
+      charCountEl.textContent = words + ' 词';
+    });
+
+    /* ==================== Prompt 构造 ==================== */
+    function buildPrompt(type, material, studentText, extraText) {
+      const fullScore = type.indexOf('25') !== -1 ? 25 : 15;
+      let p =
+        '你是一位高中英语特级教师。当前题型：【' + type + '】。材料：【' + (material || '（未提供）') + '】。' +
+        '请识别我提供的图片中的手写英文（或批改我提供的文字），并进行深度批改：' +
+        '1.预估分数（' + fullScore + '分制）；2.逐句语法纠错；3.高级词汇与句型替换；4.提分建议。请使用 Markdown 格式输出。';
+      if (studentText) p += '\n\n【学生作文文字】\n' + studentText;
+      if (extraText)   p += '\n\n【附加文字材料】\n' + extraText;
+      return p;
+    }
+
+    /* ==================== 单篇批改请求 ==================== */
+    async function gradeOne(item, type, material, sharedText) {
+      // 1. 构造多模态 content 数组
+      const contentParts = [];
+      if (item.kind === 'image') {
+        contentParts.push({ type: 'image_url', image_url: { url: item.dataUrl } });
+      }
+      const prompt = buildPrompt(
+        type,
+        material,
+        item.kind === 'text' ? sharedText : '',
+        item.kind === 'image' ? sharedText : ''
+      );
+      contentParts.push({ type: 'text', text: prompt });
+
+      // 2. 发起请求
+      const resp = await fetch(API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + API_KEY,
+        },
+        body: JSON.stringify({
+          model: MODEL,
+          messages: [{ role: 'user', content: contentParts }],
+          temperature: 1,
+        }),
+      });
+
+      if (!resp.ok) {
+        let detail = '';
+        try { detail = await resp.text(); } catch (_) { /* ignore */ }
+        throw new Error('API 请求失败（HTTP ' + resp.status + '）' + (detail ? '：' + detail.slice(0, 300) : ''));
+      }
+
+      const data = await resp.json();
+      const reply =
+        data && data.choices && data.choices[0] &&
+        data.choices[0].message && data.choices[0].message.content
+          ? data.choices[0].message.content
+          : '';
+      if (!reply.trim()) throw new Error('模型未返回批改内容，请重试');
+      return reply;
+    }
+
+    /* ==================== 学生卡片（动态追加，绝不整体覆盖） ==================== */
+    function createStudentCard(index, label, request) {
+      const card = document.createElement('article');
+      card.className = 'fade-in bg-white rounded-2xl shadow-card border border-slate-100 overflow-hidden';
+      card.innerHTML =
+        '<div class="flex items-center justify-between px-6 py-4 border-b border-slate-100 bg-navy-50">' +
+          '<div class="flex items-center gap-3 min-w-0">' +
+            '<span class="w-8 h-8 shrink-0 rounded-lg bg-navy-700 text-white text-sm font-bold flex items-center justify-center">' + index + '</span>' +
+            '<div class="min-w-0">' +
+              '<h3 class="text-sm font-bold text-navy-900">学生 ' + index + '</h3>' +
+              '<p class="text-xs text-slate-400 truncate max-w-[220px]" title="' + escapeHtml(label) + '">' + escapeHtml(label) + '</p>' +
+            '</div>' +
+          '</div>' +
+          '<div class="flex items-center gap-2 shrink-0">' +
+            '<span class="score-badge hidden inline-flex items-center px-2.5 py-1 rounded-full bg-navy-700 text-white text-xs font-bold"></span>' +
+            '<span class="card-status text-xs text-slate-400">等待中</span>' +
+            '<button type="button" class="retry-btn hidden text-xs text-slate-400 hover:text-navy-700 underline underline-offset-2">重试</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="card-body px-6 py-5 text-sm text-slate-500">排队中…</div>';
+      resultCards.appendChild(card);
+
+      const data = {
+        index: index, label: label, request: request, card: card,
+        body:   card.querySelector('.card-body'),
+        badge:  card.querySelector('.score-badge'),
+        status: card.querySelector('.card-status'),
+        retry:  card.querySelector('.retry-btn'),
+      };
+      data.retry.addEventListener('click', () => retryStudent(data));
+      studentCards.push(data);
+      return data;
+    }
+
+    function setCardPending(data) {
+      data.status.textContent = '批改中…';
+      data.status.className = 'card-status text-xs text-slate-400';
+      data.badge.classList.add('hidden');
+      data.retry.classList.add('hidden');
+      data.body.classList.remove('result-body', 'prose', 'prose-slate', 'max-w-none');
+      data.body.classList.add('text-slate-500');
+      data.body.textContent = 'AI 正在批改这篇作文，请稍候…';
+    }
+
+    function renderIntoCard(data, md) {
+      data.status.textContent = '已完成';
+      data.status.className = 'card-status text-xs text-emerald-600 font-medium';
+      data.body.classList.add('result-body', 'prose', 'prose-slate', 'max-w-none');
+      data.body.classList.remove('text-slate-500');
+      if (window.marked && typeof window.marked.parse === 'function') {
+        data.body.innerHTML = window.marked.parse(md);
+      } else {
+        data.body.textContent = md;
+      }
+      const m = md.match(/(\d+(?:\.\d+)?)\s*\/\s*(15|25)/);
+      if (m) {
+        data.badge.textContent = '预估 ' + m[1] + '/' + m[2] + ' 分';
+        data.badge.classList.remove('hidden');
+      }
+      data.retry.classList.add('hidden');
+    }
+
+    function renderCardError(data, err) {
+      const msg = String((err && err.message) || err || '未知错误');
+      const isNetworkError = /failed to fetch|networkerror|load failed|cors/i.test(msg);
+      data.status.textContent = '批改失败';
+      data.status.className = 'card-status text-xs text-red-500 font-medium';
+      data.body.classList.remove('result-body', 'prose', 'prose-slate', 'max-w-none');
+      data.body.classList.add('text-slate-500');
+      data.body.innerHTML =
+        '<p class="text-sm text-red-500 font-medium mb-1">本篇批改失败</p>' +
+        '<p class="text-xs text-slate-400 break-all">' + escapeHtml(msg) + '</p>' +
+        (isNetworkError
+          ? '<p class="text-xs text-slate-400 mt-2">可能是浏览器 CORS 跨域限制或网络不通，可点击「重试」，或通过本地代理转发请求。</p>'
+          : '');
+      data.retry.classList.remove('hidden');
+    }
+
+    async function retryStudent(data) {
+      if (isRunning) return;
+      setCardPending(data);
+      addLog('重试：学生 ' + data.index + '（' + data.label + '）');
+      try {
+        const md = await gradeOne(data.request.item, batchContext.type, batchContext.material, batchContext.text);
+        renderIntoCard(data, md);
+        successCount++;
+        failCount = Math.max(0, failCount - 1);
+        updateSummary();
+        addLog('学生 ' + data.index + ' 重试成功', 'ok');
+      } catch (err) {
+        renderCardError(data, err);
+        addLog('学生 ' + data.index + ' 重试失败：' + (err && err.message ? err.message : err), 'err');
+      }
+    }
+
+    /* ==================== 批量批改主流程（顺序队列 + 1 秒间隔） ==================== */
+    function setLoading(loading) {
+      gradeBtn.disabled = loading;
+      if (loading) {
+        btnIcon.innerHTML = '<span class="spinner"></span>';
+        btnText.textContent = '正在批量批改，请稍候…';
+      } else {
+        btnIcon.innerHTML = BTN_ICON_HTML;
+        btnText.textContent = '开始批改';
+      }
+    }
+
+    gradeBtn.addEventListener('click', runBatch);
+
+    async function runBatch() {
+      if (isRunning) return;
+
+      const type     = essayTypeEl.value;
+      const material = materialEl.value.trim();
+      const text     = essayTextEl.value.trim();
+
+      // —— 前置校验 ——
+      if (!API_KEY || API_KEY === '在这里填入你的KEY') {
+        alert('请先在代码顶部的 API_KEY 中填入你的 Kimi API Key');
+        return;
+      }
+
+      // 组装任务队列：图片优先（按上传顺序），文字作为最后一项
+      const items = [];
+      imageQueue.filter((i) => i.status === 'ready').forEach((i) =>
+        items.push({ kind: 'image', name: i.name, dataUrl: i.dataUrl })
+      );
+      const skipped = imageQueue.filter((i) => i.status !== 'ready').length;
+      if (text) items.push({ kind: 'text', name: '文字作文' });
+      if (!items.length) {
+        alert('请先上传至少一张作文照片（或在高级选项中输入作文文字）');
+        return;
+      }
+
+      // —— 初始化本轮状态 ——
+      isRunning = true;
+      setLoading(true);
+      batchContext = { type: type, material: material, text: text };
+
+      // 新一轮开始：清空上一轮结果卡片与日志（仅此一次，之后全部动态追加）
+      resultCards.innerHTML = '';
+      studentCards = [];
+      successCount = 0;
+      failCount = 0;
+      logBox.innerHTML = '';
+      updateProgress(0, items.length);
+      updateSummary();
+
+      progressPanel.classList.remove('hidden');
+      resultSection.classList.remove('hidden');
+      exportBar.classList.add('hidden');
+
+      addLog('开始批量批改：共 ' + items.length + ' 项（' +
+        items.filter((i) => i.kind === 'image').length + ' 张图片' +
+        (text ? ' + 1 段文字' : '') + '）', 'info');
+      if (skipped > 0) addLog('有 ' + skipped + ' 张图片压缩失败，已自动跳过', 'warn');
+
+      // —— 顺序处理队列 ——
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        const index = i + 1;
+        const card = createStudentCard(index, item.name, { item: item });
+        setCardPending(card);
+        addLog('[' + index + '/' + items.length + '] 正在批改「' + item.name + '」…');
+
+        try {
+          const md = await gradeOne(item, type, material, text);
+          renderIntoCard(card, md);
+          successCount++;
+          addLog('[' + index + '/' + items.length + '] 「' + item.name + '」批改完成', 'ok');
+        } catch (err) {
+          renderCardError(card, err);
+          failCount++;
+          addLog('[' + index + '/' + items.length + '] 「' + item.name + '」批改失败：' + err.message, 'err');
+        }
+
+        updateProgress(index, items.length);
+        updateSummary();
+
+        // 每次请求之间延时 1 秒（最后一项之后不再等待）
+        if (i < items.length - 1) {
+          addLog('等待 1 秒后进行下一项请求…');
+          await sleep(REQUEST_INTERVAL);
+        }
+      }
+
+      addLog('全部完成：成功 ' + successCount + ' / ' + items.length + ' 篇', 'ok');
+      isRunning = false;
+      setLoading(false);
+      exportBar.classList.remove('hidden'); // 批改完成后出现导出按钮
+      resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    /* ==================== 导出 Word（html-docx-js） ==================== */
+    function buildExportHtml() {
+      const now = new Date().toLocaleString('zh-CN');
+      const type = essayTypeEl.value;
+      const material = materialEl.value.trim() || '（未提供）';
+
+      let html =
+        '<html><head><meta charset="utf-8"><style>' +
+        'body{font-family:"Microsoft YaHei","SimSun",sans-serif;font-size:11pt;color:#222;line-height:1.6;}' +
+        'h1{font-size:18pt;color:#1e3a8a;text-align:center;margin:0 0 6pt 0;}' +
+        '.meta{font-size:10pt;color:#555;text-align:center;margin:0 0 6pt 0;}' +
+        'h2{font-size:14pt;color:#1e3a8a;border-bottom:1pt solid #1e3a8a;padding-bottom:3pt;margin:18pt 0 8pt 0;}' +
+        'h3{font-size:12pt;color:#2c4f96;margin:12pt 0 4pt 0;}' +
+        'p{margin:5pt 0;}ul,ol{margin:5pt 0;padding-left:18pt;}li{margin:3pt 0;}' +
+        'table{border-collapse:collapse;width:100%;}th,td{border:1pt solid #999;padding:4pt 6pt;font-size:10pt;}' +
+        'blockquote{border-left:3pt solid #1e3a8a;background:#eef2f9;padding:4pt 8pt;margin:6pt 0;}' +
+        'code{background:#eef2f9;font-family:Consolas,monospace;}' +
+        '.pagebreak{page-break-before:always;}' +
+        '.score{font-size:11pt;color:#1e3a8a;font-weight:bold;}' +
+        '</style></head><body>' +
+        '<h1>高中英语 AI 批改报告</h1>' +
+        '<p class="meta">题型：' + escapeHtml(type) + ' ｜ 材料：' + escapeHtml(material) + ' ｜ 生成时间：' + now + '</p>';
+
+      studentCards.forEach((c, i) => {
+        html += '<h2>学生 ' + (i + 1) + (c.label ? '（' + escapeHtml(c.label) + '）' : '') + '</h2>';
+        if (c.badge && !c.badge.classList.contains('hidden')) {
+          html += '<p class="score">' + escapeHtml(c.badge.textContent) + '</p>';
+        }
+        html += c.body.innerHTML;
+        if (i < studentCards.length - 1) html += '<div class="pagebreak"></div>';
+      });
+
+      html += '</body></html>';
+      return html;
+    }
+
+    exportBtn.addEventListener('click', async () => {
+      if (!window.htmlDocx || typeof window.htmlDocx.asBlob !== 'function') {
+        alert('Word 导出组件（html-docx-js）加载失败，请检查网络后刷新页面重试');
+        return;
+      }
+      if (!studentCards.length) {
+        alert('暂无可导出的批改结果');
+        return;
+      }
+
+      exportBtn.disabled = true;
+      exportBtnText.textContent = '正在生成 Word，请稍候…';
+      try {
+        const html = buildExportHtml();
+        const result = window.htmlDocx.asBlob(html, 'portrait'); // 新旧版本均兼容（同步 Blob 或 Promise）
+        const blob = await Promise.resolve(result);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = '高中英语批改报告_' + new Date().toISOString().slice(0, 10) + '.docx';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+        addLog('Word 报告已导出下载', 'ok');
+      } catch (err) {
+        const m = err && err.message ? err.message : String(err);
+        alert('导出失败：' + m);
+        addLog('Word 导出失败：' + m, 'err');
+      } finally {
+        exportBtn.disabled = false;
+        exportBtnText.textContent = '一键导出所有批改报告为 Word（.docx）';
+      }
+    });
+  </script>
+</body>
+</html>
