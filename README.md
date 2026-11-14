@@ -9,8 +9,7 @@ An AI-powered web tool for high school English essay grading, supporting **batch
 - 📥 **一键导出**：支持将所有批改结果一键导出为 Word 文档。
 
 ## 🖥️ 在线体验 (Live Demo)
-👉 **[点击这里，在线体验 AI 批改系统]([https://gleaming-youtiao-e04843.netlify.app])**
-*(注：使用前需在网页内填入您自己的 Kimi API Key)*
+👉 **[点击这里，在线体验 AI 批改系统](https://gleaming-youtiao-e04843.netlify.app)**
 
 ## 🛠️ 技术栈 (Tech Stack)
 - **Frontend**: HTML5, Tailwind CSS, JavaScript (Canvas Base64 Compression)
